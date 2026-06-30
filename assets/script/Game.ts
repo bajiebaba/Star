@@ -51,6 +51,9 @@ export class Game extends Component {
     @property({ tooltip: '期望星球数量；0 表示按 game 区域面积自动估算' })
     starFieldTargetCount = 0;
 
+    @property({ tooltip: '运动天体（引力弹弓）占比 [0,1]；0 = 全部静止' })
+    movingStarRatio = 0.3;
+
     @property({ tooltip: '出界判定额外边距（px），在 game 节点矩形外再留一点缓冲' })
     boundsFailMargin = 0;
 
@@ -223,6 +226,7 @@ export class Game extends Component {
             targetCount: this.starFieldTargetCount,
             startStarRadius: startStar?.radius ?? 160,
             startStarGravityRange: startStar?.gravityRange,
+            movingStarRatio: this.movingStarRatio,
         });
 
         console.log(`[Game] 生成星球 ${defs.length} 颗，game 范围 ${width}×${height}`);
@@ -286,6 +290,10 @@ export class Game extends Component {
         star.rotationSpeed = def.rotationSpeed;
         star.isStartStar = false;
         star.orbitMinAltitude = def.orbitMinAltitude;
+        // 引力弹弓：运动天体参数（0 表示静止）
+        star.orbitalAngularSpeed = def.orbitalAngularSpeed;
+        star.orbitalRadius = def.orbitalRadius;
+        star.orbitalPhaseDeg = def.orbitalPhaseDeg;
 
         // 尺寸只调 spr，body pivot 保持 1，避免与 spr 叠乘
         star.applyVisualScaleForRadius(def.radius);
@@ -386,7 +394,23 @@ export class Game extends Component {
         if (event.getID() !== this._chargeTouchId) {
             return;
         }
-        this._releaseIgnitionCharge();
+
+        // 抬手时若触摸点已移出蓄力星球本体，则取消点火（按钮滑出取消）
+        const star = this._chargeStar;
+        const camera = this.followCamera;
+        let insideBody = false;
+        if (star?.isAlive() && camera) {
+            const loc = event.getLocation();
+            camera.screenToWorld(v3(loc.x, loc.y, 0), this._touchWorld);
+            insideBody = star.containsWorldPoint(this._touchWorld.x, this._touchWorld.y);
+        }
+
+        if (insideBody) {
+            this._releaseIgnitionCharge();
+        } else {
+            this._cancelIgnitionCharge(true);
+            console.log('[Game] 抬手在星球外，点火取消');
+        }
     }
 
     /** 蓄力进度 [0,1] */

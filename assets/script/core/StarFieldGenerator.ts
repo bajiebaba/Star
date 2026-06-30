@@ -8,6 +8,12 @@ export interface StarSpawnDef {
     gravityRange: number;
     rotationSpeed: number;
     orbitMinAltitude: number;
+    /** 天体公转角速度（度/秒），0=静止；用于引力弹弓 */
+    orbitalAngularSpeed: number;
+    /** 天体公转半径（px），0=静止 */
+    orbitalRadius: number;
+    /** 天体公转初始相位（度） */
+    orbitalPhaseDeg: number;
 }
 
 export interface StarFieldOptions {
@@ -29,6 +35,14 @@ export interface StarFieldOptions {
     startStarRadius?: number;
     /** 起始星引力范围；未传则按 startStarRadius 公式估算 */
     startStarGravityRange?: number;
+    /** 运动天体（引力弹弓）占比 [0,1]，默认 0.3；0 = 全部静止 */
+    movingStarRatio?: number;
+    /** 运动天体公转半径范围（px） */
+    movingRadiusMin?: number;
+    movingRadiusMax?: number;
+    /** 运动天体公转角速度大小范围（度/秒，符号随机） */
+    movingAngularMin?: number;
+    movingAngularMax?: number;
 }
 
 /** 轻量确定性 PRNG（mulberry32） */
@@ -91,6 +105,16 @@ export class StarFieldGenerator {
         const startGravity =
             options.startStarGravityRange ?? StarFieldGenerator.computeGravityRange(startR);
 
+        // 引力弹弓：运动天体参数
+        const movingRatio = options.movingStarRatio ?? 0.3;
+        const movingRMin = options.movingRadiusMin ?? 36;
+        const movingRMax = options.movingRadiusMax ?? 50;
+        const movingWMin = options.movingAngularMin ?? 40;
+        const movingWMax = options.movingAngularMax ?? 75;
+        // 间距预留运动余量：运动天体晃动 ±R，预留 2×Rmax 保证运动中本体不重叠
+        const movingClearance = movingRatio > 0 ? movingRMax * 2 : 0;
+        const effectiveBodyGap = bodyGap + movingClearance;
+
         const halfW = boundsWidth * 0.5;
         const halfH = boundsHeight * 0.5;
         const area = boundsWidth * boundsHeight;
@@ -136,7 +160,7 @@ export class StarFieldGenerator {
                 startGravity,
                 radius,
                 newGravity,
-                bodyGap,
+                effectiveBodyGap,
                 phaseGravityBodyGap,
             );
             if (dx0 * dx0 + dy0 * dy0 < startKeep * startKeep) {
@@ -152,7 +176,7 @@ export class StarFieldGenerator {
                     other.gravityRange,
                     radius,
                     newGravity,
-                    bodyGap,
+                    effectiveBodyGap,
                     phaseGravityBodyGap,
                 );
                 if (dx * dx + dy * dy < need * need) {
@@ -164,7 +188,15 @@ export class StarFieldGenerator {
                 continue;
             }
 
-            placed.push(StarFieldGenerator._makeDef(nextId++, x, y, radius, rng));
+            const def = StarFieldGenerator._makeDef(nextId++, x, y, radius, rng);
+            // 引力弹弓：按比例让部分星球绕初始位置做圆周运动
+            if (movingRatio > 0 && rng() < movingRatio) {
+                def.orbitalRadius = Math.round(movingRMin + (movingRMax - movingRMin) * rng());
+                const w = movingWMin + (movingWMax - movingWMin) * rng();
+                def.orbitalAngularSpeed = Math.round((rng() < 0.5 ? -1 : 1) * w);
+                def.orbitalPhaseDeg = Math.round(rng() * 360);
+            }
+            placed.push(def);
         }
 
         return placed;
@@ -192,6 +224,9 @@ export class StarFieldGenerator {
             gravityRange,
             rotationSpeed,
             orbitMinAltitude,
+            orbitalAngularSpeed: 0,
+            orbitalRadius: 0,
+            orbitalPhaseDeg: 0,
         };
     }
 }

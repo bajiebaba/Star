@@ -215,6 +215,9 @@ export class PhysicsManager {
         player.savePreviousState();
         player.tickOutOfBoundsGrace(dt);
 
+        // 0. 推进运动天体（引力弹弓的前提）：先更新星球位置，再用最新位置算引力
+        this._advanceStars(dt);
+
         // 1. 叠加所有星球引力（惯性 / 公转 / 入轨全程真实积分，保证丝滑）
         this._applyGravity(player, dt);
 
@@ -402,6 +405,15 @@ export class PhysicsManager {
         const scale = maxSpeed / speed;
         player.physicsVel.x *= scale;
         player.physicsVel.y *= scale;
+    }
+
+    /** 固定步推进所有运动天体（绕锚点公转），为引力弹弓提供运动的引力源 */
+    private _advanceStars(dt: number): void {
+        for (const star of this._stars) {
+            if (star.isAlive() && star.isMoving()) {
+                star.tickOrbitalMotion(dt);
+            }
+        }
     }
 
     /** 万有引力：公转/入轨仅受宿主星；惯性飞行受全部星球（N 体） */

@@ -84,6 +84,15 @@ export class Star extends Component {
     @property
     isStartStar = false;
 
+    @property({ tooltip: '天体公转角速度（度/秒），绕初始位置画圆，0=静止。配合 orbitalRadius 提供线速度，用于引力弹弓' })
+    orbitalAngularSpeed = 0;
+
+    @property({ tooltip: '天体公转半径（px），绕初始位置画圆的幅度；线速度 = 半径 × 角速度' })
+    orbitalRadius = 0;
+
+    @property({ tooltip: '天体公转初始相位（度）' })
+    orbitalPhaseDeg = 0;
+
     @property({ tooltip: '点火点击判定：相对视觉半径的放宽倍率（1.0 = 正好贴合星球视觉边缘）' })
     bodyHitScale = 1.1;
 
@@ -106,6 +115,12 @@ export class Star extends Component {
     /** 引力范围可视化节点（Graphics 画圆，半径 = gravityRange） */
     private _gravityFieldNode: Node | null = null;
     private readonly _physicsPos = v2();
+    /** 公转运动圆心（懒初始化为初始位置反推，保证起点无跳变） */
+    private readonly _orbitAnchor = v2();
+    /** 当前线速度（世界单位 px/s），供引力弹弓 / 朝向参考 */
+    private readonly _linearVel = v2();
+    private _orbitElapsed = 0;
+    private _orbitInitialized = false;
 
     onLoad(): void {
         this._resolveBodyNodes();
@@ -332,6 +347,56 @@ export class Star extends Component {
             return -1;
         }
         return null;
+    }
+
+    /** 是否为运动天体（参与引力弹弓） */
+    isMoving(): boolean {
+        return this.orbitalRadius > 0 && this.orbitalAngularSpeed !== 0;
+    }
+
+    /**
+     * 推进天体公转运动（由 PhysicsManager 在每个固定物理步调用）。
+     * 绕圆心匀速画圆，圆心由首次调用时的位置与相位反推，保证起点无位置跳变。
+     */
+    tickOrbitalMotion(dt: number): void {
+        if (!this.isMoving() || !this.node?.isValid) {
+            return;
+        }
+        const w = (this.orbitalAngularSpeed * Math.PI) / 180;
+        const phase = (this.orbitalPhaseDeg * Math.PI) / 180;
+
+        if (!this._orbitInitialized) {
+            const p = this.node.position;
+            // 反推圆心：使 t=0 时星球正好处于当前位置（圆上），避免初始 R 跳变
+            this._orbitAnchor.set(
+                p.x - this.orbitalRadius * Math.cos(phase),
+                p.y - this.orbitalRadius * Math.sin(phase),
+            );
+            this._orbitElapsed = 0;
+            this._orbitInitialized = true;
+        }
+
+        this._orbitElapsed += dt;
+        const a = phase + w * this._orbitElapsed;
+        const x = this._orbitAnchor.x + this.orbitalRadius * Math.cos(a);
+        const y = this._orbitAnchor.y + this.orbitalRadius * Math.sin(a);
+        const z = this.node.position.z;
+        this.node.setPosition(x, y, z);
+
+        // 圆周运动线速度 = d/dt[anchor + R(cos a, sin a)] = R·w·(-sin a, cos a)
+        this._linearVel.set(
+            -this.orbitalRadius * w * Math.sin(a),
+            this.orbitalRadius * w * Math.cos(a),
+        );
+    }
+
+    /** 当前线速度（px/s）；静止天体为 (0,0) */
+    getLinearVelocity(out?: Vec2): Vec2 {
+        if (out) {
+            out.set(this._linearVel);
+            return out;
+        }
+        return this._linearVel;
     }
 
     update(dt: number): void {

@@ -705,7 +705,10 @@
     "orbitMinAltitude": 40,
     "orbitLiftStrength": 3,
     "isStartStar": true,
-    "bodyHitScale": 1.32,
+    "orbitalAngularSpeed": 0,
+    "orbitalRadius": 0,
+    "orbitalPhaseDeg": 0,
+    "bodyHitScale": 1,
     "bodyHitPadding": 10,
     "pressBodyScale": 0.94,
     "chargeBodyScale": 0.88,
@@ -765,7 +768,7 @@
   },
   {
     "__type__": "cc.Node",
-    "_name": "btn_黄_大",
+    "_name": "body",
     "_objFlags": 0,
     "__editorExtras__": {},
     "_parent": {
@@ -823,7 +826,7 @@
   },
   {
     "__type__": "cc.Node",
-    "_name": "btn_黄_大-001",
+    "_name": "p1",
     "_objFlags": 0,
     "__editorExtras__": {},
     "_parent": {
@@ -932,7 +935,7 @@
   },
   {
     "__type__": "cc.Node",
-    "_name": "btn_黄_大-002",
+    "_name": "p2",
     "_objFlags": 0,
     "__editorExtras__": {},
     "_parent": {
@@ -1041,7 +1044,7 @@
   },
   {
     "__type__": "cc.Node",
-    "_name": "btn_黄_大-003",
+    "_name": "p3",
     "_objFlags": 0,
     "__editorExtras__": {},
     "_parent": {
@@ -1243,7 +1246,7 @@
     "__prefab": null,
     "mass": 10,
     "bodyRadius": 0,
-    "ignitionImpulse": 420,
+    "ignitionImpulse": 600,
     "chargeMaxDuration": 1,
     "chargeMinRatio": 0.35,
     "chargeMaxRatio": 1,
@@ -1255,6 +1258,9 @@
     "settlingIgniteDelay": 0.4,
     "orbitPulseFloatAmp": 6,
     "orbitPulseFreq": 0.5,
+    "orbitReverseDuration": 0.4,
+    "orbitReverseMinInterval": 0.3,
+    "orbitTurnTiltDeg": 18,
     "_id": "c6JnH36OJKb41zBZIzo2y6"
   },
   {
@@ -1329,6 +1335,7 @@
     "portraitScale": 1.08,
     "starFieldSeed": 20260629,
     "starFieldTargetCount": 0,
+    "movingStarRatio": 0.3,
     "boundsFailMargin": 0,
     "_id": "b0zWlQwElAZod02O4LTIUF"
   },

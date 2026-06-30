@@ -10,7 +10,6 @@ import {
     Node,
     UITransform,
     v2,
-    v3,
 } from 'cc';
 import { Math2D } from './core/Math2D';
 import { OrientationManager } from './core/OrientationManager';
@@ -57,6 +56,15 @@ export class Game extends Component {
     @property({ tooltip: '出界判定额外边距（px），在 game 节点矩形外再留一点缓冲' })
     boundsFailMargin = 0;
 
+    @property({ tooltip: '抬手位置距按下位置超过此像素（UI 坐标）则取消点火' })
+    ignitionCancelDistance = 200;
+
+    @property({ tooltip: '蓄力中拖拽超过此像素（UI 坐标）才参与公转方向判定' })
+    orbitDragThreshold = 10;
+
+    @property({ tooltip: '公转方向拖拽径向死区：|sin(A−B)| 低于此值（拖拽接近径向）时不切换方向，防抖动' })
+    orbitDragDeadzone = 0.26;
+
     private readonly _physics = new PhysicsManager();
     private readonly _renderPos = v2();
     private readonly _cameraVel = { value: 0 };
@@ -71,10 +79,14 @@ export class Game extends Component {
     private _chargeStar: Star | null = null;
     /** 自按下起的蓄力时长（秒） */
     private _chargeElapsed = 0;
-    /** 反转公转方向的防抖冷却（秒），>0 时忽略反向输入 */
-    private _orbitReverseCooldown = 0;
-    /** 触摸点世界坐标缓存（屏幕→世界换算复用，避免每次点击新建） */
-    private readonly _touchWorld = v3();
+    /** 按下时的 UI 坐标（用于抬手取消距离判定 / 拖拽控制公转方向） */
+    private readonly _chargeStartUI = v2();
+    /** 拖拽已设定的公转方向符号（0=未设 / +1=CCW 偏左 / −1=CW 偏右） */
+    private _dragOrbitSign = 0;
+    /** 冲量阶段：点火后进度条改为表示冲量剩余，直到完全被捕获 */
+    private _impulsePhase = false;
+    /** 点火时的蓄力值（冲量阶段进度条初值，无缝衔接） */
+    private _igniteChargeRatio = 0;
 
     onLoad(): void {
         if (!this.followCamera) {
@@ -95,9 +107,7 @@ export class Game extends Component {
         if (this._phase === GamePhase.Playing) {
             this._physics.tick(dt);
             this._updateIgnitionCharge(dt);
-            if (this._orbitReverseCooldown > 0) {
-                this._orbitReverseCooldown = Math.max(0, this._orbitReverseCooldown - dt);
-            }
+            this._updateImpulseGauge();
             this._checkOutOfBounds();
         }
 
@@ -112,6 +122,7 @@ export class Game extends Component {
 
     onDestroy(): void {
         input.off(Input.EventType.TOUCH_START, this._onTouchStart, this);
+        input.off(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.off(Input.EventType.TOUCH_END, this._onTouchEnd, this);
         input.off(Input.EventType.TOUCH_CANCEL, this._onTouchEnd, this);
         this.unschedule(this._refreshGravityFieldBatch);
@@ -127,7 +138,6 @@ export class Game extends Component {
     private _setupLevel(): void {
         this._phase = GamePhase.Playing;
         this._cancelIgnitionCharge(true);
-        this._orbitReverseCooldown = 0;
         this._physics.reset();
         this._resolvePlayer();
 
@@ -300,7 +310,13 @@ export class Game extends Component {
         return star;
     }
 
-    /** 飞船飞出 game 矩形则失败；仅自由飞行态判定，点火后有宽限期 */
+    /**
+     * 飞船飞出 game 矩形则环绕传送（不再失败）：
+     * - 左右出界 → x 传到对边，y 取互补（−y，中心对称）
+     * - 上下出界 → y 传到对边，x 取互补（−x）
+     * - 角点同时出界 → 两轴都传到对边（中心对称到对角）
+     * 速度保持不变；仅惯性飞行态判定。
+     */
     private _checkOutOfBounds(): void {
         const player = this.player;
         if (!player || this._phase !== GamePhase.Playing) {
@@ -309,27 +325,44 @@ export class Game extends Component {
         if (player.flightMode !== FlightMode.FreeFlight) {
             return;
         }
-        if (player.outOfBoundsGrace > 0) {
+
+        let { x, y } = player.physicsPos;
+
+        // 异常坐标兜底（极端情况）：判失败重试，避免 NaN/Infinity 污染物理
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            this._onLevelFailed('invalid_position');
             return;
         }
 
-        const { halfW, halfH, width, height } = this._getGameBounds();
-        const margin = player.getLogicRadius() + this.boundsFailMargin;
-        const { x, y } = player.physicsPos;
-
-        if (
-            !Number.isFinite(x) ||
-            !Number.isFinite(y) ||
-            x < -halfW - margin ||
-            x > halfW + margin ||
-            y < -halfH - margin ||
-            y > halfH + margin
-        ) {
-            console.warn(
-                `[Game] 出界 pos=(${x.toFixed(1)}, ${y.toFixed(1)}) bounds=${width}×${height}`,
-            );
-            this._onLevelFailed('out_of_bounds');
+        const { halfW, halfH } = this._getGameBounds();
+        const xOut = x < -halfW || x > halfW;
+        const yOut = y < -halfH || y > halfH;
+        if (!xOut && !yOut) {
+            return;
         }
+
+        if (xOut && yOut) {
+            // 角点：两轴都传到对边（中心对称到对角）
+            x = x < 0 ? halfW : -halfW;
+            y = y < 0 ? halfH : -halfH;
+        } else if (xOut) {
+            // 左右出界：x 传对边，y 取互补
+            x = x < 0 ? halfW : -halfW;
+            y = -y;
+        } else {
+            // 上下出界：y 传对边，x 取互补
+            y = y < 0 ? halfH : -halfH;
+            x = -x;
+        }
+
+        player.physicsPos.set(x, y);
+        // 速度不变；同步上一帧状态，避免渲染插值画出横跨屏幕的拉线
+        player.syncRenderState();
+        // 相机直接对准新位置，避免平滑跟随划过整个场景
+        this._renderPos.set(x, y);
+        this._snapCameraToPlayer();
+
+        console.log(`[Game] 环绕传送 → (${x.toFixed(1)}, ${y.toFixed(1)})`);
     }
 
     private _onLevelFailed(reason: string): void {
@@ -343,6 +376,7 @@ export class Game extends Component {
 
     private _bindInput(): void {
         input.on(Input.EventType.TOUCH_START, this._onTouchStart, this);
+        input.on(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
         input.on(Input.EventType.TOUCH_CANCEL, this._onTouchEnd, this);
     }
@@ -359,34 +393,73 @@ export class Game extends Component {
         }
 
         const player = this.player;
-        const camera = this.followCamera;
-        if (!player || !camera) {
+        if (!player) {
             return;
         }
 
-        // 触摸屏幕坐标 → 世界坐标（考虑相机移动/缩放），用于圆形命中判定
-        const loc = event.getLocation();
-        camera.screenToWorld(v3(loc.x, loc.y, 0), this._touchWorld);
+        // 任意位置点击均可触发蓄力，但需处于可点火状态（公转 / 软入轨后期）
         const host = player.getIgniteHost();
-
-        // 按住星球本体：蓄力点火
-        if (host?.isAlive() && host.containsWorldPoint(this._touchWorld.x, this._touchWorld.y)) {
-            this._chargeTouchId = event.getID();
-            this._chargeStar = host;
-            this._chargeElapsed = 0;
-            host.beginIgnitionPress();
-
-            console.log(
-                `[Game] 按住星球 ${host.node.name} 蓄力 | flightMode=${FlightMode[player.flightMode]}`,
-            );
+        if (!host?.isAlive()) {
             return;
         }
 
-        // 点击星球外：反转公转方向（公转态或软入轨后期），带最小间隔防抖
-        if (this._orbitReverseCooldown <= 0 && this._physics.reverseOrbitDirection(player)) {
-            this._orbitReverseCooldown = player.orbitReverseMinInterval;
-            const dir = player.orbitDirectionSign === 1 ? 'CCW' : 'CW';
-            console.log(`[Game] 公转反向 → ${dir}`);
+        const ui = event.getUILocation();
+        this._chargeTouchId = event.getID();
+        this._chargeStar = host;
+        this._chargeElapsed = 0;
+        this._chargeStartUI.set(ui.x, ui.y);
+        this._dragOrbitSign = 0;
+        this._impulsePhase = false;
+        host.beginIgnitionPress();
+        player.showChargeProgress(0);
+
+        console.log(
+            `[Game] 蓄力开始 | host=${host.node.name} flightMode=${FlightMode[player.flightMode]}`,
+        );
+    }
+
+    /**
+     * 拖拽控制公转方向：
+     * A = 拖拽向量（当前手指 − 按下点），B = 飞船相对宿主星方位（径向）。
+     * 拖拽方向贴近哪个切向就朝那边公转 —— 用叉积符号 sign(径向 × 拖拽) = sign(sin(A−B)) 判定。
+     */
+    private _onTouchMove(event: EventTouch): void {
+        const player = this.player;
+        if (event.getID() !== this._chargeTouchId || !player) {
+            return;
+        }
+        const host = this._chargeStar;
+        if (!host?.isAlive()) {
+            return;
+        }
+
+        // A：拖拽向量（UI 坐标；相机不旋转，方向轴与世界一致）
+        const ui = event.getUILocation();
+        const dx = ui.x - this._chargeStartUI.x;
+        const dy = ui.y - this._chargeStartUI.y;
+        const dragLen = Math.sqrt(dx * dx + dy * dy);
+        if (dragLen < this.orbitDragThreshold) {
+            return;
+        }
+
+        // B：飞船相对宿主星方位（径向）
+        const starPos = host.getPhysicsPosition();
+        const rx = player.physicsPos.x - starPos.x;
+        const ry = player.physicsPos.y - starPos.y;
+        const rLen = Math.sqrt(rx * rx + ry * ry);
+        if (rLen < 1e-3) {
+            return;
+        }
+
+        // 归一化叉积 = sin(A−B)：>0 拖拽偏 CCW 切向，<0 偏 CW；接近 0（拖拽近径向）为死区，保持当前方向
+        const nc = (rx * dy - ry * dx) / (rLen * dragLen);
+        if (Math.abs(nc) < this.orbitDragDeadzone) {
+            return;
+        }
+        const sign = nc > 0 ? 1 : -1;
+        if (sign !== this._dragOrbitSign && this._physics.setOrbitDirection(player, sign)) {
+            this._dragOrbitSign = sign;
+            console.log(`[Game] 拖拽公转方向 → ${sign === 1 ? 'CCW' : 'CW'}`);
         }
     }
 
@@ -395,21 +468,19 @@ export class Game extends Component {
             return;
         }
 
-        // 抬手时若触摸点已移出蓄力星球本体，则取消点火（按钮滑出取消）
-        const star = this._chargeStar;
-        const camera = this.followCamera;
-        let insideBody = false;
-        if (star?.isAlive() && camera) {
-            const loc = event.getLocation();
-            camera.screenToWorld(v3(loc.x, loc.y, 0), this._touchWorld);
-            insideBody = star.containsWorldPoint(this._touchWorld.x, this._touchWorld.y);
-        }
+        // 抬手位置距按下位置超过阈值 → 取消点火
+        const ui = event.getUILocation();
+        const dx = ui.x - this._chargeStartUI.x;
+        const dy = ui.y - this._chargeStartUI.y;
+        const moved = Math.sqrt(dx * dx + dy * dy);
 
-        if (insideBody) {
-            this._releaseIgnitionCharge();
-        } else {
+        if (moved > this.ignitionCancelDistance) {
             this._cancelIgnitionCharge(true);
-            console.log('[Game] 抬手在星球外，点火取消');
+            console.log(
+                `[Game] 抬手距按下点 ${moved.toFixed(0)}px > ${this.ignitionCancelDistance}，点火取消`,
+            );
+        } else {
+            this._releaseIgnitionCharge();
         }
     }
 
@@ -436,7 +507,9 @@ export class Game extends Component {
         }
 
         this._chargeElapsed += dt;
-        this._chargeStar.setIgnitionPressVisual(this._getChargeRatio());
+        const ratio = this._getChargeRatio();
+        this._chargeStar.setIgnitionPressVisual(ratio);
+        player.showChargeProgress(ratio);
     }
 
     /** 松手：按蓄力冲量点火 */
@@ -451,12 +524,14 @@ export class Game extends Component {
         star?.resetIgnitionPressVisual();
 
         if (!player || !star) {
+            player?.hideChargeProgress();
             return;
         }
 
         const host = player.getIgniteHost();
         if (host !== star) {
             console.warn('[Game] 点火取消：宿主已变化');
+            player.hideChargeProgress();
             return;
         }
 
@@ -465,12 +540,50 @@ export class Game extends Component {
         const ignited = this._physics.ignitePlayer(impulse);
 
         if (ignited) {
+            // 切入冲量阶段：进度条不隐藏，初值=蓄力值（无缝），随后表示冲量剩余
+            this._impulsePhase = true;
+            this._igniteChargeRatio = ratio;
+            player.showChargeProgress(ratio);
             console.log(
                 `[Game] 松手点火成功 | charge=${(ratio * 100).toFixed(0)}% impulse=${impulse.toFixed(0)}`,
             );
         } else {
+            player.hideChargeProgress();
             console.warn('[Game] 松手点火失败');
         }
+    }
+
+    /**
+     * 冲量阶段：点火后进度条改为表示「冲量剩余」。
+     * 剩余 = 点火蓄力值 × clamp01(当前速度 / 点火初速度)，随引力减速自然下降；
+     * 飞船完全被捕获（进入稳定公转 Orbiting）时归 0 并隐藏。
+     */
+    private _updateImpulseGauge(): void {
+        if (!this._impulsePhase) {
+            return;
+        }
+        const player = this.player;
+        if (!player) {
+            this._impulsePhase = false;
+            return;
+        }
+
+        // 完全被捕获（稳定公转）→ 归 0 并隐藏
+        if (player.flightMode === FlightMode.Orbiting) {
+            this._impulsePhase = false;
+            player.showChargeProgress(0);
+            player.hideChargeProgress();
+            return;
+        }
+
+        // 自由飞行 / 软入轨过渡：按 当前速度 / 点火初速度 比例衰减
+        const speed = Math.sqrt(
+            player.physicsVel.x * player.physicsVel.x +
+                player.physicsVel.y * player.physicsVel.y,
+        );
+        const base = player.igniteSpeed > 1e-3 ? player.igniteSpeed : 1;
+        const remaining = this._igniteChargeRatio * Math.min(1, Math.max(0, speed / base));
+        player.showChargeProgress(remaining);
     }
 
     /** 取消蓄力（不点火）；restoreVisual 为 true 时恢复星球缩放 */
@@ -478,6 +591,8 @@ export class Game extends Component {
         if (restoreVisual) {
             this._chargeStar?.resetIgnitionPressVisual();
         }
+        this._impulsePhase = false;
+        this.player?.hideChargeProgress();
         this._chargeTouchId = -1;
         this._chargeStar = null;
         this._chargeElapsed = 0;

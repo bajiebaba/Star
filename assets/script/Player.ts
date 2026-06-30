@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, UITransform, Vec2, v2 } from 'cc';
+import { _decorator, Component, Node, ProgressBar, UITransform, Vec2, v2 } from 'cc';
 import { Math2D } from './core/Math2D';
 import type { Star } from './Star';
 
@@ -95,6 +95,8 @@ export class Player extends Component {
     lastIgniteHost: Star | null = null;
     /** 点火后出界免疫倒计时（秒），避免刚脱离就被误判失败 */
     outOfBoundsGrace = 0;
+    /** 点火瞬间速度大小（冲量剩余进度条的基准初速度） */
+    igniteSpeed = 0;
 
     private _bodyNode: Node | null = null;
 
@@ -109,6 +111,9 @@ export class Player extends Component {
     private _floatBaseX = 0;
     private _floatBaseY = 0;
     private _floatBaseZ = 0;
+    /** 点火蓄力进度条：power 节点上的 ProgressBar，非蓄力时隐藏 */
+    private _powerNode: Node | null = null;
+    private _powerBar: ProgressBar | null = null;
 
     onLoad(): void {
         this._bodyNode = this._resolveBodyNode();
@@ -124,6 +129,37 @@ export class Player extends Component {
             bodyUi.setAnchorPoint(0.5, 0.5);
         }
         this._resolveFloatNode();
+        this._resolvePowerBar();
+    }
+
+    /** 解析 power 蓄力进度条（递归查找，power 挂在 body 子树下），并默认隐藏 */
+    private _resolvePowerBar(): void {
+        // power 是 body 的子节点而非 player 直接子节点，故用 getComponentInChildren 递归查找
+        this._powerBar = this.node.getComponentInChildren(ProgressBar);
+        this._powerNode = this._powerBar ? this._powerBar.node : null;
+        if (this._powerNode) {
+            this._powerNode.active = false;
+        }
+    }
+
+    /** 显示并更新点火蓄力进度 [0,1] */
+    showChargeProgress(ratio: number): void {
+        if (!this._powerNode?.isValid) {
+            this._resolvePowerBar();
+        }
+        if (this._powerNode) {
+            this._powerNode.active = true;
+        }
+        if (this._powerBar) {
+            this._powerBar.progress = Math.min(1, Math.max(0, ratio));
+        }
+    }
+
+    /** 隐藏点火蓄力进度（非蓄力态不显示） */
+    hideChargeProgress(): void {
+        if (this._powerNode) {
+            this._powerNode.active = false;
+        }
     }
 
     /** 首个子节点：公转时沿轨道法线方向正弦浮动 */
@@ -324,6 +360,13 @@ export class Player extends Component {
 
                 // 软入轨：先沿飞行速度，再渐进对齐轨道法线（捕获弯折过程）
                 if (this.flightMode === FlightMode.Settling && velDeg !== null) {
+                    // 速度已达逃逸速度：本质是掠过而非入轨，保持运动方向、不转向法线对抗引力
+                    const r = Math.max(Math.sqrt(rx * rx + ry * ry), orbitHost.radius * 0.5);
+                    const vEscSq =
+                        (2 * orbitHost.gravityConstant * orbitHost.mass) / r;
+                    if (speedSq >= vEscSq) {
+                        return velDeg;
+                    }
                     const blendT = Math.min(
                         1,
                         this.settleElapsed / Math.max(0.16, this.headingCaptureBlendDuration),

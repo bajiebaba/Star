@@ -34,6 +34,10 @@ export class PhysicsManager {
     private readonly _tmpRadial = v2();
     private readonly _tmpTangential = v2();
     private readonly _tmpPerp = v2();
+    /** 公转相对速度（扣除宿主星自身平移后，在星球参考系内的速度） */
+    private readonly _tmpRel = v2();
+    /** 宿主星自身线速度缓存 */
+    private readonly _tmpStarVel = v2();
 
     /** 重叠引力区切换宿主时的强度倍率阈值，避免两星之间来回抖动 */
     private readonly _dominanceSwitchRatio = 1.12;
@@ -123,26 +127,22 @@ export class PhysicsManager {
     }
 
     /**
-     * 点击星球本体外：反转当前公转方向。
+     * 设定公转方向为指定符号（+1 CCW / −1 CW）。
      * 公转态、或软入轨后期（已可点火）均可触发；仅设定目标方向并启动平滑掉头，
-     * 不立即翻转速度，避免速度跳变。
+     * 不立即翻转速度，避免速度跳变。方向未变化时返回 false。
      */
-    reverseOrbitDirection(player: Player): boolean {
+    setOrbitDirection(player: Player, sign: number): boolean {
         const host = this._reversibleHost(player);
         if (!host) {
             return false;
         }
 
-        const hostPos = host.getPhysicsPosition();
-        const rx = player.physicsPos.x - hostPos.x;
-        const ry = player.physicsPos.y - hostPos.y;
+        const targetSign = sign > 0 ? 1 : -1;
+        if (player.orbitDirectionSign === targetSign) {
+            return false;
+        }
 
-        // 当前有效切向符号：玩家已选则沿用，否则由角动量推断
-        const currentSign =
-            player.orbitDirectionSign ??
-            (rx * player.physicsVel.y - ry * player.physicsVel.x >= 0 ? 1 : -1);
-
-        player.orbitDirectionSign = currentSign > 0 ? -1 : 1;
+        player.orbitDirectionSign = targetSign;
         player.orbitReverseRemaining = player.orbitReverseDuration;
         return true;
     }
@@ -206,6 +206,7 @@ export class PhysicsManager {
         const escapeSpeed = speed + impulseMag;
         player.physicsVel.x = this._tmpDir.x * escapeSpeed;
         player.physicsVel.y = this._tmpDir.y * escapeSpeed;
+        player.igniteSpeed = escapeSpeed;
         player.beginFreeFlightAfterIgnite(host);
         return true;
     }
@@ -522,7 +523,11 @@ export class PhysicsManager {
         return current;
     }
 
-    /** 公转态：允许与宿主星本体视觉交错；轻微切向维持，防止轨道莫名发散 */
+    /**
+     * 公转态：在宿主星参考系内维持圆轨。
+     * 扣除宿主星自身平移速度后处理相对速度，再加回——运动星球捕获时飞船会随星球平移并绕其公转，
+     * 不再相对星球漂移；径向交给真实引力，保留拉扯感。
+     */
     private _updateOrbiting(player: Player, dt: number): void {
         const host = player.boundStar;
         if (!host) {
@@ -533,24 +538,38 @@ export class PhysicsManager {
         const hostPos = host.getPhysicsPosition();
         const rx = player.physicsPos.x - hostPos.x;
         const ry = player.physicsPos.y - hostPos.y;
-        Math2D.normalize(v2(rx, ry), this._tmpDir);
-        Math2D.decomposeRadial(player.physicsVel, this._tmpDir, this._tmpRadial, this._tmpTangential);
+        const dist = Math2D.len(v2(rx, ry));
 
-        const r = Math.max(Math2D.len(v2(rx, ry)), this._minOrbitRadius(host, player));
+        // 飘出引力范围：脱离公转转入惯性飞行（避免“飘出范围却仍绕转”）
+        if (dist > host.gravityRange) {
+            player.beginFreeFlight();
+            return;
+        }
+
+        // 进入宿主星参考系：相对速度 = 飞船速度 − 星球自身平移速度
+        const starVel = host.getLinearVelocity(this._tmpStarVel);
+        this._tmpRel.set(
+            player.physicsVel.x - starVel.x,
+            player.physicsVel.y - starVel.y,
+        );
+        Math2D.normalize(v2(rx, ry), this._tmpDir);
+        Math2D.decomposeRadial(this._tmpRel, this._tmpDir, this._tmpRadial, this._tmpTangential);
+
+        const r = Math.max(dist, this._minOrbitRadius(host, player));
         const vOrbit = this.computeCircularOrbitSpeed(host, r);
         Math2D.perpendicularCCW(this._tmpDir, this._tmpPerp);
-        // _orbitTangentSign 内部已优先返回玩家选定方向，无需再 ?? 兜底
+        // 公转方向符号由相对速度决定（_orbitTangentSign 内部已优先返回玩家选定方向）
         const sign = this._orbitTangentSign(
             rx,
             ry,
-            player.physicsVel,
+            this._tmpRel,
             this._tmpTangential,
             this._tmpDir,
             player,
             host,
         );
 
-        // 目标切向矢量（纯切向，圆轨道速度）
+        // 目标切向矢量（相对星球，圆轨道速度）
         if (host.isStartStar || player.orbitDirectionSign !== null) {
             // 起始星或玩家已选方向：按符号收敛切向
             this._tmpTangential.set(this._tmpPerp.x * vOrbit * sign, this._tmpPerp.y * vOrbit * sign);
@@ -566,21 +585,27 @@ export class PhysicsManager {
             }
         }
 
+        let relVx = this._tmpRel.x;
+        let relVy = this._tmpRel.y;
         if (player.orbitReverseRemaining > 0) {
-            // 平滑掉头：在 orbitReverseDuration 内把速度收敛到「当前径向 + 反向切向」，避免速度跳变
+            // 平滑掉头：在 orbitReverseDuration 内把相对速度收敛到「当前径向 + 反向切向」
             const remain = player.orbitReverseRemaining;
             const blend = Math.min(1, dt / Math.max(remain, dt));
             const targetVx = this._tmpRadial.x + this._tmpTangential.x;
             const targetVy = this._tmpRadial.y + this._tmpTangential.y;
-            player.physicsVel.x += (targetVx - player.physicsVel.x) * blend;
-            player.physicsVel.y += (targetVy - player.physicsVel.y) * blend;
+            relVx += (targetVx - relVx) * blend;
+            relVy += (targetVy - relVy) * blend;
             player.orbitReverseRemaining = Math.max(0, remain - dt);
         } else {
-            // 公转态仅对切向做极弱收敛，径向完全交给真实引力（可产生轻微椭圆，更自然）
+            // 仅对相对切向做极弱收敛，径向完全交给真实引力（可产生轻微椭圆，更自然）
             const align = host.orbitMaintainStrength * dt;
-            player.physicsVel.x += (this._tmpTangential.x - player.physicsVel.x) * align * 0.35;
-            player.physicsVel.y += (this._tmpTangential.y - player.physicsVel.y) * align * 0.35;
+            relVx += (this._tmpTangential.x - relVx) * align * 0.35;
+            relVy += (this._tmpTangential.y - relVy) * align * 0.35;
         }
+
+        // 回到世界系：相对公转速度 + 星球平移速度，飞船随星球移动并绕其公转
+        player.physicsVel.x = starVel.x + relVx;
+        player.physicsVel.y = starVel.y + relVy;
     }
 
     /** 是否接触星体本体（星半径 + 飞船半径 + 容差） */

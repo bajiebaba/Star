@@ -95,11 +95,11 @@ export class StarFieldGenerator {
         const halfH = boundsHeight * 0.5;
         const area = boundsWidth * boundsHeight;
 
-        // 按面积估算数量，使星图视觉上「铺满」滚轴区
+        // 按面积估算数量；密度减半（除数翻倍 + 上下限减半），星图更稀疏
         let target = options.targetCount ?? 0;
         if (target <= 0) {
-            target = Math.floor(area / 175000);
-            target = Math.max(32, Math.min(72, target));
+            target = Math.floor(area / 350000);
+            target = Math.max(16, Math.min(36, target));
         }
 
         const placed: StarSpawnDef[] = [];

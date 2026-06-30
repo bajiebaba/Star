@@ -10,6 +10,7 @@ import {
     Node,
     UITransform,
     v2,
+    v3,
 } from 'cc';
 import { Math2D } from './core/Math2D';
 import { OrientationManager } from './core/OrientationManager';
@@ -67,6 +68,10 @@ export class Game extends Component {
     private _chargeStar: Star | null = null;
     /** 自按下起的蓄力时长（秒） */
     private _chargeElapsed = 0;
+    /** 反转公转方向的防抖冷却（秒），>0 时忽略反向输入 */
+    private _orbitReverseCooldown = 0;
+    /** 触摸点世界坐标缓存（屏幕→世界换算复用，避免每次点击新建） */
+    private readonly _touchWorld = v3();
 
     onLoad(): void {
         if (!this.followCamera) {
@@ -87,6 +92,9 @@ export class Game extends Component {
         if (this._phase === GamePhase.Playing) {
             this._physics.tick(dt);
             this._updateIgnitionCharge(dt);
+            if (this._orbitReverseCooldown > 0) {
+                this._orbitReverseCooldown = Math.max(0, this._orbitReverseCooldown - dt);
+            }
             this._checkOutOfBounds();
         }
 
@@ -116,6 +124,7 @@ export class Game extends Component {
     private _setupLevel(): void {
         this._phase = GamePhase.Playing;
         this._cancelIgnitionCharge(true);
+        this._orbitReverseCooldown = 0;
         this._physics.reset();
         this._resolvePlayer();
 
@@ -139,7 +148,6 @@ export class Game extends Component {
         for (const star of this._stars) {
             this._physics.registerStar(star);
             this._ensureVisibleLayer(star.node);
-            star.syncTouchHitArea();
         }
         // 分帧绘制引力圈，避免 50+ Graphics 同帧卡死主线程
         this._scheduleGravityFieldRefresh();
@@ -343,15 +351,18 @@ export class Game extends Component {
         }
 
         const player = this.player;
-        if (!player) {
+        const camera = this.followCamera;
+        if (!player || !camera) {
             return;
         }
 
-        const uiLoc = event.getUILocation();
+        // 触摸屏幕坐标 → 世界坐标（考虑相机移动/缩放），用于圆形命中判定
+        const loc = event.getLocation();
+        camera.screenToWorld(v3(loc.x, loc.y, 0), this._touchWorld);
         const host = player.getIgniteHost();
 
         // 按住星球本体：蓄力点火
-        if (host?.isAlive() && host.hitTestScreen(uiLoc.x, uiLoc.y)) {
+        if (host?.isAlive() && host.containsWorldPoint(this._touchWorld.x, this._touchWorld.y)) {
             this._chargeTouchId = event.getID();
             this._chargeStar = host;
             this._chargeElapsed = 0;
@@ -363,12 +374,11 @@ export class Game extends Component {
             return;
         }
 
-        // 公转中点击星球外：反转公转方向
-        if (player.flightMode === FlightMode.Orbiting && player.boundStar) {
-            if (this._physics.reverseOrbitDirection(player)) {
-                const dir = player.orbitDirectionSign === 1 ? 'CCW' : 'CW';
-                console.log(`[Game] 公转反向 → ${dir}`);
-            }
+        // 点击星球外：反转公转方向（公转态或软入轨后期），带最小间隔防抖
+        if (this._orbitReverseCooldown <= 0 && this._physics.reverseOrbitDirection(player)) {
+            this._orbitReverseCooldown = player.orbitReverseMinInterval;
+            const dir = player.orbitDirectionSign === 1 ? 'CCW' : 'CW';
+            console.log(`[Game] 公转反向 → ${dir}`);
         }
     }
 

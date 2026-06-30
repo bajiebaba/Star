@@ -84,11 +84,11 @@ export class Star extends Component {
     @property
     isStartStar = false;
 
-    @property({ tooltip: '点火点击判定：在视觉半径外的额外放宽倍率（小星球建议 ≥1.3）' })
-    bodyHitScale = 1.32;
+    @property({ tooltip: '点火点击判定：相对视觉半径的放宽倍率（1.0 = 正好贴合星球视觉边缘）' })
+    bodyHitScale = 1.1;
 
-    @property({ tooltip: '点火点击判定：最小 padding（px），并与 radius×0.12 取较大值' })
-    bodyHitPadding = 10;
+    @property({ tooltip: '点火点击判定：视觉半径外额外 padding（px），小星球更易点中' })
+    bodyHitPadding = 8;
 
     @property({ tooltip: '按下星球时 body 缩放倍率（相对基准 scale）' })
     pressBodyScale = 0.94;
@@ -106,15 +106,11 @@ export class Star extends Component {
     /** 引力范围可视化节点（Graphics 画圆，半径 = gravityRange） */
     private _gravityFieldNode: Node | null = null;
     private readonly _physicsPos = v2();
-    private readonly _hitTestPoint = v2();
-    /** 避免每帧重复写 UITransform */
-    private _cachedHitDiameter = -1;
 
     onLoad(): void {
         this._resolveBodyNodes();
         this._ensureGravityFieldNode();
         this._cacheBodyPivotBaseScale();
-        this.syncTouchHitArea();
     }
 
     /**
@@ -161,58 +157,38 @@ export class Star extends Component {
             this._bodyPivot.setScale(1, 1, 1);
         }
         visual.setScale(s, s, 1);
-        this._cachedHitDiameter = -1;
-        this.syncTouchHitArea();
         this.refreshBodyBaseScale();
     }
 
     /**
-     * 同步 body pivot 的 UITransform 为 spr 实际视觉尺寸。
-     * 模板克隆的小星球若仍保留 352×352 的旧 contentSize，会导致 hitTest 严重偏移。
+     * 圆形点击判定（世界坐标）：点是否落在星球视觉圆内。
+     * 圆心取 star 节点世界坐标（= 物理/视觉中心），半径取 spr 视觉世界半径，
+     * 与相机移动、分辨率缩放无关，避免矩形 hitTest 四角误触与坐标系错配。
      */
-    syncTouchHitArea(): boolean {
-        this._resolveBodyNodes();
-        const pivot = this._bodyPivot;
-        const visual = this._bodyVisual;
-        if (!pivot || !visual) {
+    containsWorldPoint(worldX: number, worldY: number): boolean {
+        if (!this.node?.isValid) {
             return false;
         }
-
-        let pivotUi = pivot.getComponent(UITransform);
-        if (!pivotUi) {
-            pivotUi = pivot.addComponent(UITransform);
-        }
-
-        const visualUi = visual.getComponent(UITransform);
-        const texHalf = visualUi
-            ? Math.max(visualUi.contentSize.width, visualUi.contentSize.height) * 0.5
-            : this.radius / Math.max(Math.abs(visual.scale.x), 0.01);
-        const sprScale = Math.max(Math.abs(visual.scale.x), Math.abs(visual.scale.y));
-        const visualDiameter = texHalf * 2 * sprScale;
-        const pad = Math.max(this.bodyHitPadding, this.radius * 0.12);
-        const hitDiameter = visualDiameter * this.bodyHitScale + pad * 2;
-
-        if (Math.abs(hitDiameter - this._cachedHitDiameter) > 0.5) {
-            pivotUi.setContentSize(hitDiameter, hitDiameter);
-            pivotUi.setAnchorPoint(0.5, 0.5);
-            this._cachedHitDiameter = hitDiameter;
-        }
-        return true;
+        const center = this.node.worldPosition;
+        const dx = worldX - center.x;
+        const dy = worldY - center.y;
+        const hitR = this._visualWorldRadius() * this.bodyHitScale + this.bodyHitPadding;
+        return dx * dx + dy * dy <= hitR * hitR;
     }
 
-    /**
-     * 屏幕 UI 坐标点击判定（与 EventTouch.getUILocation 同系，由引擎 hitTest 处理相机/缩放）。
-     */
-    hitTestScreen(uiX: number, uiY: number): boolean {
-        if (!this.syncTouchHitArea()) {
-            return false;
+    /** 星球视觉半径（世界单位）：spr 贴图半径 × 世界缩放；无 spr 时回退逻辑 radius */
+    private _visualWorldRadius(): number {
+        this._resolveBodyNodes();
+        const visual = this._bodyVisual;
+        if (visual?.isValid) {
+            const ui = visual.getComponent(UITransform);
+            if (ui) {
+                const half = Math.max(ui.contentSize.width, ui.contentSize.height) * 0.5;
+                const ws = visual.worldScale;
+                return half * Math.max(Math.abs(ws.x), Math.abs(ws.y));
+            }
         }
-        const pivotUi = this._bodyPivot?.getComponent(UITransform);
-        if (!pivotUi) {
-            return false;
-        }
-        this._hitTestPoint.set(uiX, uiY);
-        return pivotUi.hitTest(this._hitTestPoint);
+        return this.radius;
     }
 
     /** 开始按压视觉：略微缩小 body pivot（含 spr 子树） */

@@ -123,11 +123,13 @@ export class PhysicsManager {
     }
 
     /**
-     * 公转中点击星球本体外：反转当前公转方向，并立即对齐切向速度。
+     * 点击星球本体外：反转当前公转方向。
+     * 公转态、或软入轨后期（已可点火）均可触发；仅设定目标方向并启动平滑掉头，
+     * 不立即翻转速度，避免速度跳变。
      */
     reverseOrbitDirection(player: Player): boolean {
-        const host = player.boundStar;
-        if (player.flightMode !== FlightMode.Orbiting || !host?.isAlive()) {
+        const host = this._reversibleHost(player);
+        if (!host) {
             return false;
         }
 
@@ -139,25 +141,24 @@ export class PhysicsManager {
         const currentSign =
             player.orbitDirectionSign ??
             (rx * player.physicsVel.y - ry * player.physicsVel.x >= 0 ? 1 : -1);
-        const sign = currentSign > 0 ? -1 : 1;
 
-        player.orbitDirectionSign = sign;
-        this._alignOrbitTangent(player, host, sign);
+        player.orbitDirectionSign = currentSign > 0 ? -1 : 1;
+        player.orbitReverseRemaining = player.orbitReverseDuration;
         return true;
     }
 
-    /** 按指定切向符号重设公转切向速度（保留径向分量） */
-    private _alignOrbitTangent(player: Player, host: Star, sign: number): void {
-        const hostPos = host.getPhysicsPosition();
-        const rx = player.physicsPos.x - hostPos.x;
-        const ry = player.physicsPos.y - hostPos.y;
-        Math2D.normalize(v2(rx, ry), this._tmpDir);
-        Math2D.decomposeRadial(player.physicsVel, this._tmpDir, this._tmpRadial, this._tmpTangential);
-        const r = Math.max(Math2D.len(v2(rx, ry)), this._minOrbitRadius(host, player));
-        const vOrbit = this.computeCircularOrbitSpeed(host, r);
-        Math2D.perpendicularCCW(this._tmpDir, this._tmpPerp);
-        player.physicsVel.x = this._tmpRadial.x + this._tmpPerp.x * vOrbit * sign;
-        player.physicsVel.y = this._tmpRadial.y + this._tmpPerp.y * vOrbit * sign;
+    /** 可反向的宿主星：公转态用 boundStar；软入轨后期（可点火）用 settlingStar */
+    private _reversibleHost(player: Player): Star | null {
+        if (player.flightMode === FlightMode.Orbiting && player.boundStar?.isAlive()) {
+            return player.boundStar;
+        }
+        if (player.flightMode === FlightMode.Settling) {
+            const host = player.getIgniteHost();
+            if (host?.isAlive()) {
+                return host;
+            }
+        }
+        return null;
     }
 
     /** 每渲染帧调用：固定步积分 + 更新插值 alpha */
@@ -178,7 +179,11 @@ export class PhysicsManager {
         this._alpha = this._accumulator / FIXED_DT;
     }
 
-    /** 点火：沿径向向外叠加冲量，保留切向速度 → 自然脱离公转。成功返回 true */
+    /**
+     * 点火：径直沿法线（径向外）逃离。
+     * 把当前速率全部转为径向外方向并叠加冲量，切向归零，
+     * 因此无其它星球引力时飞船沿直线远离宿主星；船头朝向（公转时即法线）也保持不变，无突兀转向。
+     */
     ignitePlayer(impulse?: number): boolean {
         const player = this._player;
         if (!player) {
@@ -196,8 +201,11 @@ export class PhysicsManager {
             v2(player.physicsPos.x - hostPos.x, player.physicsPos.y - hostPos.y),
             this._tmpDir,
         );
-        player.physicsVel.x += this._tmpDir.x * impulseMag;
-        player.physicsVel.y += this._tmpDir.y * impulseMag;
+        // 速率守恒 + 冲量，方向全部转为径向外 → 径直逃离
+        const speed = Math2D.len(player.physicsVel);
+        const escapeSpeed = speed + impulseMag;
+        player.physicsVel.x = this._tmpDir.x * escapeSpeed;
+        player.physicsVel.y = this._tmpDir.y * escapeSpeed;
         player.beginFreeFlightAfterIgnite(host);
         return true;
     }
@@ -519,7 +527,8 @@ export class PhysicsManager {
         const r = Math.max(Math2D.len(v2(rx, ry)), this._minOrbitRadius(host, player));
         const vOrbit = this.computeCircularOrbitSpeed(host, r);
         Math2D.perpendicularCCW(this._tmpDir, this._tmpPerp);
-        const autoSign = this._orbitTangentSign(
+        // _orbitTangentSign 内部已优先返回玩家选定方向，无需再 ?? 兜底
+        const sign = this._orbitTangentSign(
             rx,
             ry,
             player.physicsVel,
@@ -528,8 +537,8 @@ export class PhysicsManager {
             player,
             host,
         );
-        const sign = player.orbitDirectionSign ?? autoSign;
 
+        // 目标切向矢量（纯切向，圆轨道速度）
         if (host.isStartStar || player.orbitDirectionSign !== null) {
             // 起始星或玩家已选方向：按符号收敛切向
             this._tmpTangential.set(this._tmpPerp.x * vOrbit * sign, this._tmpPerp.y * vOrbit * sign);
@@ -545,10 +554,21 @@ export class PhysicsManager {
             }
         }
 
-        // 公转态仅对切向做极弱收敛，径向完全交给真实引力（可产生轻微椭圆，更自然）
-        const align = host.orbitMaintainStrength * dt;
-        player.physicsVel.x += (this._tmpTangential.x - player.physicsVel.x) * align * 0.35;
-        player.physicsVel.y += (this._tmpTangential.y - player.physicsVel.y) * align * 0.35;
+        if (player.orbitReverseRemaining > 0) {
+            // 平滑掉头：在 orbitReverseDuration 内把速度收敛到「当前径向 + 反向切向」，避免速度跳变
+            const remain = player.orbitReverseRemaining;
+            const blend = Math.min(1, dt / Math.max(remain, dt));
+            const targetVx = this._tmpRadial.x + this._tmpTangential.x;
+            const targetVy = this._tmpRadial.y + this._tmpTangential.y;
+            player.physicsVel.x += (targetVx - player.physicsVel.x) * blend;
+            player.physicsVel.y += (targetVy - player.physicsVel.y) * blend;
+            player.orbitReverseRemaining = Math.max(0, remain - dt);
+        } else {
+            // 公转态仅对切向做极弱收敛，径向完全交给真实引力（可产生轻微椭圆，更自然）
+            const align = host.orbitMaintainStrength * dt;
+            player.physicsVel.x += (this._tmpTangential.x - player.physicsVel.x) * align * 0.35;
+            player.physicsVel.y += (this._tmpTangential.y - player.physicsVel.y) * align * 0.35;
+        }
     }
 
     /** 是否接触星体本体（星半径 + 飞船半径 + 容差） */
@@ -845,7 +865,8 @@ export class PhysicsManager {
 
         if (settled) {
             this._liftToMinOrbit(player, star, 1 / 30);
-            player.beginOrbiting(star);
+            // 保留玩家在软入轨期间选定的公转方向 / 掉头过渡
+            player.beginOrbiting(star, true);
             player.lastIgniteHost = null;
             player.captureCooldown = 0;
         }

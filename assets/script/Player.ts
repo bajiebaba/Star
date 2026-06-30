@@ -64,8 +64,19 @@ export class Player extends Component {
     @property({ tooltip: '公转正弦波频率（Hz）' })
     orbitPulseFreq = 1.15;
 
+    @property({ tooltip: '点击星球外反转公转方向时的平滑掉头时长（秒）' })
+    orbitReverseDuration = 0.4;
+
+    @property({ tooltip: '两次反转公转方向的最小间隔（秒），防误触连点' })
+    orbitReverseMinInterval = 0.3;
+
+    @property({ tooltip: '公转转向（掉头）时船头相对法线朝前进切向倾斜的角度（度）' })
+    orbitTurnTiltDeg = 18;
+
     /** 玩家指定公转切向符号（+1 CCW / −1 CW）；null 表示由捕获/起始星自动决定 */
     orbitDirectionSign: number | null = null;
+    /** 平滑掉头过渡剩余时间（秒），>0 表示切向速度正朝反向收敛 */
+    orbitReverseRemaining = 0;
 
     /** 当前物理位置 / 速度（game 节点本地坐标） */
     readonly physicsPos = v2();
@@ -156,14 +167,21 @@ export class Player extends Component {
         return null;
     }
 
-    beginOrbiting(star: Star): void {
+    /**
+     * 进入公转态。
+     * @param preserveDirection 软入轨完成时升级公转时传 true，保留玩家在入轨期间选定的公转方向
+     */
+    beginOrbiting(star: Star, preserveDirection = false): void {
         this.flightMode = FlightMode.Orbiting;
         this.boundStar = star;
         this.settlingStar = null;
         this.settleElapsed = 0;
         this.outOfBoundsGrace = 0;
         this._orbitPulsePhase = 0;
-        this.orbitDirectionSign = null;
+        if (!preserveDirection) {
+            this.orbitDirectionSign = null;
+            this.orbitReverseRemaining = 0;
+        }
     }
 
     beginFreeFlight(): void {
@@ -172,6 +190,7 @@ export class Player extends Component {
         this.settlingStar = null;
         this.settleElapsed = 0;
         this.orbitDirectionSign = null;
+        this.orbitReverseRemaining = 0;
         this._resetOrbitFloatVisual();
     }
 
@@ -199,6 +218,7 @@ export class Player extends Component {
         this.boundStar = null;
         this.settleElapsed = 0;
         this.orbitDirectionSign = null;
+        this.orbitReverseRemaining = 0;
         this._resetOrbitFloatVisual();
     }
 
@@ -311,6 +331,16 @@ export class Player extends Component {
                     return Math2D.lerpAngleDeg(velDeg, radialDeg, blendT);
                 }
 
+                // 公转转向（掉头过渡）：船头由法线朝前进切向略微倾斜，表现喷射方向调整
+                if (
+                    this.flightMode === FlightMode.Orbiting &&
+                    this.orbitReverseRemaining > 0 &&
+                    this.orbitDirectionSign !== null
+                ) {
+                    return radialDeg + this.orbitTurnTiltDeg * this.orbitDirectionSign;
+                }
+
+                // 公转无操作：船头与法线同向（尾部喷射对抗引力，悬浮公转）
                 return radialDeg;
             }
         }
